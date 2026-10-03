@@ -1,10 +1,8 @@
 <h1 align="center">dhscp</h1>  
-<h3 align="center">Dahua cameras serial number prefix scraper</h3>  
-<p align="center">
-  <img src="https://img.shields.io/badge/Go-1.26%2B-00647d?style=flat&logo=go&logoColor=ffffff" alt="Go"/>
-</p>  
 
 ## Installation:  
+<img src="https://img.shields.io/badge/Go-1.26%2B-00647d?style=flat&logo=go&logoColor=ffffff" alt="Go"/>
+
 **Build from source:**  
 ```shell
 git clone https://github.com/thebadinteger/dhscp.git
