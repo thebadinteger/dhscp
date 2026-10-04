@@ -1,8 +1,10 @@
 <h1 align="center">dhscp</h1>  
+<h3 align="center">Dahua cameras serial number prefix scraper</h3>  
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-1.26%2B-00647d?style=flat&logo=go&logoColor=ffffff" alt="Go"/>
+</p>  
 
 ## Installation:  
-<img src="https://img.shields.io/badge/Go-1.26%2B-00647d?style=flat&logo=go&logoColor=ffffff" alt="Go"/>
-
 **Build from source:**  
 ```shell
 git clone https://github.com/thebadinteger/dhscp.git
@@ -13,9 +15,12 @@ Or download the latest binary from the **[Releases page](https://github.com/theb
 
 ## Usage:  
 ```shell
-./dhscp -i [input] -o [output] -t [threads] -p [port] -w [timeout] -m [mode]
+./dhscp scan -i [input] -o [output] -t [threads] -p [port] -w [timeout] -m [mode]
+./dhscp parse -i [input] -o [output] -g [model,part*] -m [mode]
 ```  
 ```
+[scan, parse] session mode
+default > scan
 [-i, --input] input file or specific target(s)
 format: IP, IP:port, range, cidr, masscan
 [-o, --output] output file for results
@@ -24,6 +29,8 @@ default > DD-MM-YYYY_HH-MM-SS
 default > 200
 [-p, --port] port(s) to check
 default > 37777
+[-g, --get] get model(s) from csv output
+default > *
 [-w, --timeout] check timeout in seconds
 default > 5
 [-m, --mode] output mode: txt/csv

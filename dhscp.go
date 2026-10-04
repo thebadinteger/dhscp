@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -530,6 +531,8 @@ func printErrorAndExit(err string) {
 func printHelp() {
 	nowStr := time.Now().Format("15:04:05")
 	colOrange.Printf("[%s] dhscp\n", nowStr)
+	fmt.Println("[scan, parse] session mode")
+	fmt.Println("default > scan")
 	fmt.Println("[-i, --input] input file or specific target(s)")
 	fmt.Println("format: IP, IP:port, range, cidr, masscan")
 	fmt.Println("[-o, --output] output file for results")
@@ -538,6 +541,8 @@ func printHelp() {
 	fmt.Println("default > 200")
 	fmt.Println("[-p, --port] port(s) to check")
 	fmt.Println("default > 37777")
+	fmt.Println("[-g, --get] get model(s) from csv output")
+	fmt.Println("default > *")
 	fmt.Println("[-w, --timeout] check timeout in seconds")
 	fmt.Println("default > 5")
 	fmt.Println("[-m, --mode] output mode: txt/csv")
@@ -559,10 +564,27 @@ func main() {
 		}
 	}
 
+	sessionMode := "scan"
+	if len(args) > 0 {
+		switch args[0] {
+		case "scan":
+			sessionMode = "scan"
+			args = args[1:]
+		case "parse":
+			sessionMode = "parse"
+			args = args[1:]
+		default:
+			if !strings.HasPrefix(args[0], "-") {
+				printErrorAndExit("input invalid")
+			}
+		}
+	}
+
 	var inputArg string
 	var outputArg string
 	threads := 200
 	portArg := "37777"
+	getArg := "*"
 	timeoutSec := 5
 	modeArg := "txt"
 
@@ -588,6 +610,9 @@ func main() {
 		case "-o", "--output":
 			outputArg = val
 		case "-t", "--threads":
+			if sessionMode != "scan" {
+				printErrorAndExit("input invalid")
+			}
 			if val == "" {
 				printErrorAndExit("invalid threads")
 			}
@@ -597,11 +622,25 @@ func main() {
 			}
 			threads = n
 		case "-p", "--port":
+			if sessionMode != "scan" {
+				printErrorAndExit("input invalid")
+			}
 			if val == "" {
 				printErrorAndExit("invalid port")
 			}
 			portArg = val
+		case "-g", "--get":
+			if sessionMode != "parse" {
+				printErrorAndExit("input invalid")
+			}
+			if val == "" {
+				printErrorAndExit("invalid get")
+			}
+			getArg = val
 		case "-w", "--timeout":
+			if sessionMode != "scan" {
+				printErrorAndExit("input invalid")
+			}
 			if val == "" {
 				printErrorAndExit("invalid timeout")
 			}
@@ -627,6 +666,252 @@ func main() {
 	if modeArg != "txt" && modeArg != "csv" {
 		printErrorAndExit("invalid mode")
 	}
+
+	if sessionMode == "parse" {
+		runParse(inputArg, outputArg, getArg, modeArg)
+		return
+	}
+
+	runScan(inputArg, outputArg, threads, portArg, timeoutSec, modeArg)
+}
+
+type parseRecord struct {
+	model  string
+	prefix string
+}
+
+// compile model filter
+func compileModelFilter(pattern string) (func(string) bool, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" || pattern == "*" {
+		return func(string) bool { return true }, nil
+	}
+
+	var regexes []*regexp.Regexp
+	for p := range strings.SplitSeq(pattern, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p == "*" {
+			return func(string) bool { return true }, nil
+		}
+		var b strings.Builder
+		b.WriteString("(?i)^")
+		for i := 0; i < len(p); i++ {
+			c := p[i]
+			switch c {
+			case '*':
+				b.WriteString(".*")
+			case '?':
+				b.WriteString(".")
+			default:
+				b.WriteString(regexp.QuoteMeta(string(c)))
+			}
+		}
+		b.WriteString("$")
+		re, err := regexp.Compile(b.String())
+		if err != nil {
+			return nil, err
+		}
+		regexes = append(regexes, re)
+	}
+
+	if len(regexes) == 0 {
+		return func(string) bool { return true }, nil
+	}
+
+	return func(model string) bool {
+		for _, re := range regexes {
+			if re.MatchString(model) {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
+// run parse session
+func runParse(inputArg, outputArg, getArg, modeArg string) {
+	fileInfo, err := os.Stat(inputArg)
+	if err != nil || fileInfo.IsDir() {
+		printErrorAndExit("input file not found")
+	}
+
+	inF, err := os.Open(inputArg)
+	if err != nil {
+		printErrorAndExit(fmt.Sprintf("error: %s", err))
+	}
+	defer inF.Close()
+
+	filter, err := compileModelFilter(getArg)
+	if err != nil {
+		printErrorAndExit("invalid get")
+	}
+
+	var records []parseRecord
+	scanner := bufio.NewScanner(inF)
+	buf := make([]byte, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.EqualFold(line, "model,prefix") {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) == 2 {
+			m := strings.TrimSpace(parts[0])
+			p := strings.TrimSpace(parts[1])
+			if m == "" {
+				m = "n/a"
+			}
+			if p != "" {
+				records = append(records, parseRecord{model: m, prefix: p})
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+	}
+	if len(records) == 0 {
+		printErrorAndExit("input invalid")
+	}
+
+	if outputArg == "" {
+		outputArg = time.Now().Format("02-01-2006_15-04-05") + "." + modeArg
+	} else if filepath.Ext(outputArg) == "" {
+		outputArg = outputArg + "." + modeArg
+	}
+
+	outDir := filepath.Dir(outputArg)
+	if outDir != "" && outDir != "." {
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			printErrorAndExit("cannot create output")
+		}
+	}
+
+	seenPrefixes := make(map[string]bool)
+	var fileExists bool
+	if existingF, err := os.Open(outputArg); err == nil {
+		if fi, err := existingF.Stat(); err == nil && fi.Size() > 0 {
+			fileExists = true
+		}
+		s := bufio.NewScanner(existingF)
+		for s.Scan() {
+			line := strings.TrimSpace(s.Text())
+			if line == "" {
+				continue
+			}
+			if modeArg == "csv" {
+				if strings.EqualFold(line, "model,prefix") {
+					continue
+				}
+				parts := strings.Split(line, ",")
+				if len(parts) == 2 {
+					seenPrefixes[strings.TrimSpace(parts[1])] = true
+				}
+			} else {
+				seenPrefixes[line] = true
+			}
+		}
+		if err := s.Err(); err != nil {
+		}
+		existingF.Close()
+	}
+
+	outF, err := os.OpenFile(outputArg, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		printErrorAndExit("cannot create output")
+	}
+	defer outF.Close()
+
+	if modeArg == "csv" && !fileExists {
+		outF.WriteString("model,prefix\n")
+	}
+
+	nowStr := time.Now().Format("15:04:05")
+	colOrange.Printf("[%s] dhscp\n", nowStr)
+	fmt.Printf("input > %s\n", inputArg)
+	fmt.Printf("output > %s\n", outputArg)
+	fmt.Printf("get > %s\n", getArg)
+	fmt.Printf("mode > %s\n", modeArg)
+
+	var interrupted atomic.Bool
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for range sigChan {
+			if interrupted.CompareAndSwap(false, true) {
+				nowStr := time.Now().Format("15:04:05")
+				fmt.Print("\r\n")
+				colRed.Printf("[%s] interrupted\n", nowStr)
+				os.Exit(0)
+			} else {
+				os.Exit(1)
+			}
+		}
+	}()
+
+	total := len(records)
+	var latest string
+	var lastLen int
+	var lastPrint time.Time
+
+	for i, rec := range records {
+		if interrupted.Load() {
+			return
+		}
+		if filter(rec.model) {
+			prefix := rec.prefix
+			if len(prefix) > 10 {
+				prefix = prefix[:10]
+			}
+			if !seenPrefixes[prefix] {
+				seenPrefixes[prefix] = true
+				if modeArg == "csv" {
+					fmt.Fprintf(outF, "%s,%s\n", rec.model, prefix)
+				} else {
+					fmt.Fprintf(outF, "%s\n", prefix)
+				}
+			}
+			latest = fmt.Sprintf("%s | %s", rec.model, prefix)
+		}
+
+		if time.Since(lastPrint) >= 50*time.Millisecond || i == total-1 {
+			lastPrint = time.Now()
+			line := fmt.Sprintf("[%d/%d] %s", i+1, total, latest)
+			if latest == "" {
+				line = fmt.Sprintf("[%d/%d]", i+1, total)
+			}
+			pad := 0
+			if len(line) < lastLen {
+				pad = lastLen - len(line)
+			}
+			lastLen = len(line)
+			if !color.NoColor {
+				fmt.Fprintf(color.Output, "\r\033[2K%s%s", line, strings.Repeat(" ", pad))
+			}
+		}
+	}
+
+	finalLine := fmt.Sprintf("[%d/%d] %s", total, total, latest)
+	if latest == "" {
+		finalLine = fmt.Sprintf("[%d/%d]", total, total)
+	}
+	if !color.NoColor {
+		fmt.Fprintf(color.Output, "\r\033[2K%s\n", finalLine)
+	} else {
+		fmt.Println(finalLine)
+	}
+
+	doneStr := time.Now().Format("15:04:05")
+	colGreen.Printf("[%s] done!\n", doneStr)
+}
+
+// run scan session
+func runScan(inputArg, outputArg string, threads int, portArg string, timeoutSec int, modeArg string) {
 
 	var defaultPorts []int
 	for pStr := range strings.SplitSeq(portArg, ",") {
@@ -691,14 +976,12 @@ func main() {
 				continue
 			}
 			if modeArg == "csv" {
-				if strings.EqualFold(line, "model,prefix") || strings.EqualFold(line, "ip,model,prefix") {
+				if strings.EqualFold(line, "model,prefix") {
 					continue
 				}
 				parts := strings.Split(line, ",")
 				if len(parts) == 2 {
 					seenPrefixes[strings.TrimSpace(parts[1])] = true
-				} else if len(parts) >= 3 {
-					seenPrefixes[strings.TrimSpace(parts[2])] = true
 				}
 			} else {
 				seenPrefixes[line] = true
